@@ -59,17 +59,23 @@ func newPinger() *pinger {
 		startTimes: make(map[int]time.Time),
 		id:         os.Getpid() & 0xffff,
 	}
-	remote, err := net.ResolveIPAddr("ip4", *target)
-	if err != nil {
-		log.Fatal(err)
-	}
-	p.remote = remote
 
 	con, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
 		log.Fatal(err)
 	}
 	p.con = con
+
+	// If the network is unreachable, keep trying.
+	for {
+		remote, err := net.ResolveIPAddr("ip4", *target)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		p.remote = remote
+		break
+	}
 
 	return p
 }
@@ -89,12 +95,14 @@ func (p *pinger) sendLoop() {
 
 		wb, err := wm.Marshal(nil)
 		if err != nil {
+			// If this happens, there must be a bug. Crash hard.
 			log.Fatal(err)
 		}
 
 		start := time.Now()
 		if _, err := p.con.WriteTo(wb, p.remote); err != nil {
-			log.Fatal(err)
+			log.Println(err)
+			continue
 		}
 
 		p.Lock()
@@ -117,7 +125,11 @@ func (p *pinger) recvLoop(g *prometheus.GaugeVec) {
 	for {
 		n, peer, err := p.con.ReadFrom(buf)
 		if err != nil {
-			log.Fatal(err)
+			log.Println(err)
+			// Just in case p.con "breaks", don't make this a busy loop hogging
+			// a core.
+			time.Sleep(time.Second)
+			continue
 		}
 
 		rm, err := icmp.ParseMessage(1, buf[:n])
